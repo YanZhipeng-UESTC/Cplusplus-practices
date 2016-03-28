@@ -1,0 +1,137 @@
+#ifndef __MEMPOOL_H__
+#define __MEMPOOL_H__
+#include <new>
+#include <memory>
+using std::size_t;
+using std::ptrdiff_t;
+class pool_alloc_base
+{
+protected:
+	enum{align=8};
+	enum{max_size=128};
+	enum{freelist_size=max_size/align};
+	union Obj
+	{
+		Obj* next_freelist_link;
+		char client_data[1];
+	};
+	static Obj* freelist[freelist_size];
+	static char* start_free;
+	static char* end_free;
+	static size_t heap_size;
+	size_t round_up(size_t bytes)
+	{
+		return (bytes + static_cast<size_t>(align)-1)&~(static_cast<size_t>(align) - 1);
+	}
+	Obj** get_free_list(size_t bytes)
+	{
+		size_t i = (bytes + static_cast<size_t>(align)-1) / static_cast<size_t>(align) - 1;
+		return freelist + i;
+	}
+	void* refill(size_t aligned_bytes);
+	char* alloc_chunk(size_t aligned_bytes, size_t &nobjs);
+	/*overloading the operator new to decrease the size of allocation*/
+	/*this is only a suggestion*/
+	/*
+	void* operator new(size_t n)
+	{
+		if (n == 0)
+			n = 1;
+		void *result;
+		size_t nobjs = 40; //every time we call operator new,that means we need to allocate 40 objects
+		size_t aligned_bytes = n / nobjs;
+		while (true)
+		{
+			if (result=malloc(nobjs*aligned_bytes))
+				return result;
+			else
+			{
+				nobjs >>= 1;
+				if (nobjs == 0)
+					throw std::bad_alloc();
+			}
+		}
+	}
+	*/
+};
+template<typename Ty>
+class pool_alloc :private pool_alloc_base
+{
+public:
+	typedef size_t size_type;
+	typedef ptrdiff_t difference_type;
+	typedef Ty value_type;
+	typedef Ty* pointer;
+	typedef const Ty* const_pointer;
+	typedef Ty& reference;
+	typedef const Ty& const_reference;
+	template<typename U>
+	struct rebind
+	{
+		typedef pool_alloc<U> other;
+	};
+	pool_alloc() {}
+	~pool_alloc() {};
+	pool_alloc(const pool_alloc&) {};
+	template<typename Ty2>
+	pool_alloc(const pool_alloc<Ty2>&) {};
+	pointer address(reference x)const
+	{
+		return std::addressof(x);
+	}
+	const_pointer address(const_reference x)const
+	{
+		return std::addressof(x);
+	}
+	pointer allocate(size_type n, const void* hint = nullptr);
+	void deallocate(pointer p, size_type n);
+	size_type maxsize()const{ return (size_type)-1 / sizeof(Ty); }
+	void construct(pointer p, const_reference ty)
+	{
+		::new(static_cast<void*>(p))Ty(ty);
+	}
+	void destroy(pointer p){ p->~Ty(); }
+};
+template<typename Ty>
+inline bool operator==(const pool_alloc<Ty>&, const pool_alloc<Ty>){ return true; }
+template<typename Ty>
+inline bool operator!=(const pool_alloc<Ty>&, const pool_alloc<Ty>){ return false; }
+template<typename Ty>
+typename pool_alloc<Ty>::pointer pool_alloc<Ty>::allocate(size_type n, const void* hint /* = 0 */)
+{
+	pointer result = nullptr;
+	if (n > maxsize())
+		throw std::bad_alloc();
+	size_type bytes = n*sizeof(Ty);
+	if (bytes > static_cast<size_type>(max_size) || bytes == 0)
+		return static_cast<pointer>(::operator new(bytes));
+	Obj** M_freelist = get_free_list(bytes);
+	Obj* ret = *M_freelist;
+	if (ret != nullptr)
+	{
+		result = reinterpret_cast<pointer>(ret);
+		*M_freelist = ret->next_freelist_link;
+	}
+	else
+		result = static_cast<pointer>(refill(round_up(bytes)));
+	if (result == nullptr)
+		throw std::bad_alloc();
+	return result;
+}
+template<typename Ty>
+void pool_alloc<Ty>::deallocate(pointer p, size_type n)
+{
+	size_type bytes = n*sizeof(Ty);
+	if (bytes > static_cast<size_type>(max_size) || bytes == 0)
+		::operator delete(p);
+	else
+	{
+		Obj** M_freelist = get_free_list(bytes);
+		Obj* q = reinterpret_cast<Obj*>(p);
+		q->next_freelist_link = *M_freelist;
+		*M_freelist = q;
+	}
+}
+
+#endif //__MEMPOOL_H__
+
